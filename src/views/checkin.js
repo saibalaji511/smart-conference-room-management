@@ -1,27 +1,44 @@
 // ===== CHECK-IN VIEW =====
+import { supabase } from '../supabase.js';
 import * as store from '../data/store.js';
 import { getCurrentUser } from '../auth.js';
 import { showToast } from '../components/toast.js';
 
-export function renderCheckin(container) {
-    const user = getCurrentUser();
-    const today = new Date().toISOString().split('T')[0];
-    const now = new Date();
-    const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+export async function renderCheckin(container) {
+  const user = getCurrentUser();
+  const today = new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    const allTodayBookings = store.getTodaysBookings();
-    const myBookings = allTodayBookings
-        .filter(b => b.userId === user.id || b.attendees?.includes(user.id))
-        .sort((a, b) => a.startTime.localeCompare(b.startTime));
+  // Show a loading state while fetching from database
+  container.innerHTML = `<div style="padding: 2rem; text-align: center;">Loading your meetings...</div>`;
 
-    const upcoming = myBookings.filter(b => b.startTime > currentTime && !b.checkedIn && b.status === 'confirmed');
-    const current = myBookings.filter(b => b.startTime <= currentTime && b.endTime > currentTime);
-    const past = myBookings.filter(b => b.endTime <= currentTime);
+  // Fetch today's bookings from Supabase
+  // Note: Adjust the .eq('date', today) if your column name for date is different.
+  const { data: allTodayBookings, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('date', today);
 
-    const checkedInCount = myBookings.filter(b => b.checkedIn).length;
-    const totalCount = myBookings.length;
+  if (error) {
+    console.error('Error fetching bookings from Supabase:', error);
+    showToast('Error loading bookings', 'error');
+    container.innerHTML = `<div style="padding: 2rem; text-align: center; color: red;">Failed to load data from database.</div>`;
+    return;
+  }
 
-    container.innerHTML = `
+  const myBookings = (allTodayBookings || [])
+    .filter(b => b.userId === user.id || b.attendees?.includes(user.id))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+  const upcoming = myBookings.filter(b => b.startTime > currentTime && !b.checkedIn && b.status === 'confirmed');
+  const current = myBookings.filter(b => b.startTime <= currentTime && b.endTime > currentTime);
+  const past = myBookings.filter(b => b.endTime <= currentTime);
+
+  const checkedInCount = myBookings.filter(b => b.checkedIn).length;
+  const totalCount = myBookings.length;
+
+  container.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-xl);flex-wrap:wrap;gap:var(--space-md)">
       <div>
         <h2 style="font-size:var(--fs-2xl)">Check-in & Attendance</h2>
@@ -84,20 +101,21 @@ export function renderCheckin(container) {
           </thead>
           <tbody>
             ${myBookings.map(b => {
-        const room = store.getRoomById(b.roomId);
-        return `
+    // Still using local store for room details for now, to keep it simple
+    const room = store.getRoomById(b.roomId);
+    return `
                 <tr>
                   <td><strong>${b.title}</strong></td>
                   <td>${room?.name || 'N/A'}</td>
                   <td>${formatTime(b.startTime)} — ${formatTime(b.endTime)}</td>
                   <td>${b.checkedIn ? '<span class="badge badge-available"><i class="fas fa-check"></i> Present</span>' :
-                b.status === 'auto-released' ? '<span class="badge badge-maintenance">Auto-Released</span>' :
-                    b.endTime <= currentTime ? '<span class="badge badge-occupied">Missed</span>' :
-                        '<span class="badge badge-upcoming">Pending</span>'}</td>
+        b.status === 'auto-released' ? '<span class="badge badge-maintenance">Auto-Released</span>' :
+          b.endTime <= currentTime ? '<span class="badge badge-occupied">Missed</span>' :
+            '<span class="badge badge-upcoming">Pending</span>'}</td>
                   <td>${b.checkedInAt ? new Date(b.checkedInAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—'}</td>
                 </tr>
               `;
-    }).join('')}
+  }).join('')}
             ${myBookings.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:var(--space-lg)">No records</td></tr>' : ''}
           </tbody>
         </table>
@@ -105,36 +123,79 @@ export function renderCheckin(container) {
     </div>
   `;
 
-    // Wire check-in buttons
-    container.querySelectorAll('.btn-checkin').forEach(btn => {
-        btn.addEventListener('click', () => {
-            store.checkIn(btn.dataset.id);
-            showToast('Successfully checked in! ✓', 'success');
-            renderCheckin(container);
-        });
-    });
+  // Wire check-in buttons using Supabase
+  container.querySelectorAll('.btn-checkin').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const bookingId = btn.dataset.id;
 
-    // Wire cancel buttons
-    container.querySelectorAll('.btn-cancel-booking').forEach(btn => {
-        btn.addEventListener('click', () => {
-            if (confirm('Cancel this booking?')) {
-                store.cancelBooking(btn.dataset.id);
-                showToast('Booking cancelled', 'info');
-                renderCheckin(container);
-            }
-        });
-    });
+      // Disable button briefly to prevent double-clicks
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking in...';
 
-    updatePageTitle('Check-in', `${checkedInCount} of ${totalCount} checked in today`);
+      const { error: updateError } = await supabase
+        .from('bookings')
+        .update({
+          checkedIn: true,
+          checkedInAt: new Date().toISOString()
+        })
+        .eq('id', bookingId);
+
+      if (updateError) {
+        console.error('Error checking in:', updateError);
+        showToast('Failed to check in. Try again.', 'error');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check"></i> Check In';
+        return;
+      }
+
+      // Also update local store if needed for other parts of the app
+      try { store.checkIn(bookingId); } catch (e) { }
+
+      showToast('Successfully checked in! ✓', 'success');
+      renderCheckin(container); // Re-fetch and re-render
+    });
+  });
+
+  // Wire cancel buttons using Supabase
+  container.querySelectorAll('.btn-cancel-booking').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (confirm('Cancel this booking?')) {
+        const bookingId = btn.dataset.id;
+
+        btn.disabled = true;
+
+        // You can either delete the record entirely, or update status to 'cancelled'
+        // Here we delete it entirely:
+        const { error: deleteError } = await supabase
+          .from('bookings')
+          .delete()
+          .eq('id', bookingId);
+
+        if (deleteError) {
+          console.error('Error cancelling booking:', deleteError);
+          showToast('Failed to cancel booking', 'error');
+          btn.disabled = false;
+          return;
+        }
+
+        try { store.cancelBooking(bookingId); } catch (e) { }
+
+        showToast('Booking cancelled', 'info');
+        renderCheckin(container); // Re-fetch and re-render
+      }
+    });
+  });
+
+  updatePageTitle('Check-in', `${checkedInCount} of ${totalCount} checked in today`);
 }
 
 function renderCheckinCard(booking, type, currentTime) {
-    const room = store.getRoomById(booking.roomId);
-    const organizer = store.getUserById(booking.userId);
-    const canCheckIn = type === 'current' && !booking.checkedIn && booking.status === 'confirmed';
-    const isUpcomingSoon = type === 'upcoming' && (timeToMin(booking.startTime) - timeToMin(currentTime)) <= 15;
+  const room = store.getRoomById(booking.roomId);
+  const organizer = store.getUserById(booking.userId);
+  const canCheckIn = type === 'current' && !booking.checkedIn && booking.status === 'confirmed';
+  const isUpcomingSoon = type === 'upcoming' && (timeToMin(booking.startTime) - timeToMin(currentTime)) <= 15;
 
-    return `
+  return `
     <div class="checkin-card ${type === 'current' ? 'slide-up' : ''}" style="${type === 'current' && !booking.checkedIn ? 'border-left:3px solid var(--color-success)' : ''}${booking.checkedIn ? 'border-left:3px solid var(--brand-teal)' : ''}">
       <div class="avatar avatar-lg" style="font-size:1rem">
         <i class="fas ${room?.icon || 'fa-door-open'}"></i>
